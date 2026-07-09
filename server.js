@@ -1,6 +1,5 @@
 const express = require('express');
 const cors = require('cors');
-const puppeteer = require('puppeteer');
 const TelegramBot = require('node-telegram-bot-api');
 
 const app = express();
@@ -15,26 +14,48 @@ app.get('/', (req, res) => res.send('Smeta server works!'));
 app.post('/send-pdf', async (req, res) => {
   const { chatId, smetaData } = req.body;
   if (!chatId || !smetaData) return res.status(400).json({ error: 'Missing data' });
-
   try {
     const html = buildHTML(smetaData);
-    const browser = await puppeteer.launch({ args: ['--no-sandbox', '--disable-setuid-sandbox'] });
-    const page = await browser.newPage();
-    await page.setContent(html, { waitUntil: 'networkidle0' });
-    const pdf = await page.pdf({ format: 'A4', margin: { top: '15mm', bottom: '15mm', left: '14mm', right: '14mm' } });
-    await browser.close();
-
-    await bot.sendDocument(chatId, Buffer.from(pdf), {}, {
-      filename: 'Смета_' + (smetaData.objName || 'документ').replace(/\s+/g, '_') + '.pdf',
-      contentType: 'application/pdf'
+    const buffer = Buffer.from(html, 'utf-8');
+    const fname = (smetaData.objName || 'smeta').replace(/\s+/g, '_') + '.html';
+    await bot.sendDocument(chatId, buffer, {
+      caption: '📋 Смета: ' + (smetaData.objName || '') + '\n💰 ' + getTotals(smetaData) + '\n\n📌 Откройте файл в браузере → нажмите "Сохранить PDF"'
+    }, {
+      filename: fname,
+      contentType: 'text/html'
     });
-
     res.json({ ok: true });
-  } catch (e) {
+  } catch(e) {
     console.error(e);
     res.status(500).json({ error: e.message });
   }
 });
+
+app.post('/send-smeta', async (req, res) => {
+  const { chatId, smetaData } = req.body;
+  if (!chatId || !smetaData) return res.status(400).json({ error: 'Missing data' });
+  try {
+    const content = JSON.stringify(smetaData, null, 2);
+    const buffer = Buffer.from(content, 'utf-8');
+    const fname = (smetaData.name || smetaData.objName || 'smeta').replace(/\s+/g, '_') + '.smeta';
+    await bot.sendDocument(chatId, buffer, {
+      caption: '📋 ' + (smetaData.name || smetaData.objName || 'Смета') + '\n💰 ' + getTotals(smetaData) + '\n\n📌 Загрузите файл в приложение чтобы открыть и редактировать'
+    }, {
+      filename: fname,
+      contentType: 'application/json'
+    });
+    res.json({ ok: true });
+  } catch(e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+function getTotals(d) {
+  let mT = 0, wT = 0;
+  (d.matData || []).forEach(r => mT += r.sum);
+  (d.workData || []).forEach(r => wT += r.sum);
+  return 'Итого: ' + fmt(mT + wT) + ' руб.';
+}
 
 function fmt(n) { return Number(n || 0).toLocaleString('ru-RU', { minimumFractionDigits: 2, maximumFractionDigits: 2 }); }
 
@@ -54,8 +75,11 @@ function buildHTML(d) {
   });
   if (!workHTML) workHTML = `<tr><td colspan="6" style="text-align:center;color:#aaa">— нет позиций —</td></tr>`;
 
-  return `<!DOCTYPE html><html lang="ru"><head><meta charset="UTF-8">
-<style>*{box-sizing:border-box;margin:0;padding:0}body{font-family:Arial,sans-serif;font-size:10pt;color:#1A1A18}
+  return `<!DOCTYPE html><html lang="ru"><head><meta charset="UTF-8"><title>Смета</title>
+<style>@page{size:A4;margin:15mm 14mm}*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:Arial,sans-serif;font-size:10pt;color:#1A1A18}
+.print-btn{display:block;margin:0 auto 14px;padding:10px 28px;background:#1D9E75;color:#fff;border:none;border-radius:8px;font-size:13pt;font-weight:bold;cursor:pointer}
+@media print{.print-btn{display:none}}
 .hdr{background:#1D9E75;color:#fff;padding:10px 16px;border-radius:6px;margin-bottom:10px}
 .hdr h1{font-size:13pt;font-weight:bold;margin-bottom:2px}.hdr p{font-size:9pt;opacity:.85}
 .info{background:#F7F6F3;border:1px solid #E2E0D8;border-radius:6px;padding:10px 14px;margin-bottom:10px;display:grid;grid-template-columns:1fr 1fr;gap:4px 20px}
@@ -67,12 +91,14 @@ thead th:nth-child(1){width:5%;text-align:center}thead th:nth-child(2){width:35%
 thead th:nth-child(3){width:12%;text-align:center}thead th:nth-child(4){width:13%;text-align:right}
 thead th:nth-child(5){width:17%;text-align:right}thead th:nth-child(6){width:18%;text-align:right}
 tbody td{padding:5px 8px;border-bottom:1px solid #E8F5EE}
+tbody tr:nth-child(even) td{background:#F2FAF7}
 .sub td{background:#E1F5EE!important;padding:6px 8px;font-weight:bold;color:#0F6E56}
 .grand td{background:#0F6E56!important;color:#fff;font-weight:bold;font-size:11pt;padding:8px 10px}
 .signs{margin-top:16px;display:grid;grid-template-columns:1fr 1fr;gap:10px;font-size:9.5pt}
 .sline{border-bottom:1px solid #999;margin:14px 0 4px}.slbl{color:#6B6A65;font-size:9pt}
 .ft{margin-top:14px;border-top:1px solid #E2E0D8;padding-top:6px;font-size:8pt;color:#aaa;display:flex;justify-content:space-between}
 </style></head><body>
+<button class="print-btn" onclick="window.print()">🖨️ Сохранить как PDF</button>
 <div class="hdr"><h1>СМЕТА НА СТРОИТЕЛЬНО-МОНТАЖНЫЕ РАБОТЫ</h1><p>Строительство и ремонт</p></div>
 <div class="info">
 <div class="ir"><span class="il">Объект:</span><span>${d.objName}</span></div>
