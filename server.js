@@ -1,6 +1,7 @@
 const express = require('express');
 const cors = require('cors');
 const TelegramBot = require('node-telegram-bot-api');
+const ExcelJS = require('exceljs');
 
 const app = express();
 app.use(cors());
@@ -11,7 +12,7 @@ const bot = new TelegramBot(BOT_TOKEN);
 
 app.get('/', (req, res) => res.send('Smeta server works!'));
 
-// ── ОТПРАВИТЬ HTML (смета для PDF) ──
+// ── ОТПРАВИТЬ HTML ──
 app.post('/send-pdf', async (req, res) => {
   const { chatId, smetaData } = req.body;
   if (!chatId || !smetaData) return res.status(400).json({ error: 'Missing data' });
@@ -29,7 +30,7 @@ app.post('/send-pdf', async (req, res) => {
   }
 });
 
-// ── ОТПРАВИТЬ .json (смета для импорта) ──
+// ── ОТПРАВИТЬ .json ──
 app.post('/send-smeta', async (req, res) => {
   const { chatId, smetaData } = req.body;
   if (!chatId || !smetaData) return res.status(400).json({ error: 'Missing data' });
@@ -51,13 +52,14 @@ app.post('/send-excel', async (req, res) => {
   const { chatId, smetaData } = req.body;
   if (!chatId || !smetaData) return res.status(400).json({ error: 'Missing data' });
   try {
-    const xlsx = buildXLSX(smetaData);
+    const buffer = await buildExcel(smetaData);
     const fname = (smetaData.objName || 'smeta').replace(/\s+/g, '_') + '.xlsx';
-    await bot.sendDocument(chatId, xlsx, {
+    await bot.sendDocument(chatId, buffer, {
       caption: '📊 Смета (Excel): ' + (smetaData.objName || '') + '\n💰 ' + getTotals(smetaData)
     }, { filename: fname, contentType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
     res.json({ ok: true });
   } catch(e) {
+    console.error(e);
     res.status(500).json({ error: e.message });
   }
 });
@@ -72,161 +74,179 @@ function getTotals(d) {
 
 function fmt(n) { return Number(n || 0).toLocaleString('ru-RU', { minimumFractionDigits: 2, maximumFractionDigits: 2 }); }
 
-// ── EXCEL builder (без внешних зависимостей, чистый XML) ──
-function buildXLSX(d) {
-  let mT = 0, wT = 0;
-  const matRows = (d.matData || []).map((r, i) => { mT += r.sum; return [i+1, r.name, r.unit, r.qty, r.price, r.sum]; });
-  const workRows = (d.workData || []).map((r, i) => { wT += r.sum; return [i+1, r.name, r.unit, r.qty, r.price, r.sum]; });
+// ── КРАСИВЫЙ EXCEL ──
+async function buildExcel(d) {
+  const wb = new ExcelJS.Workbook();
+  const ws = wb.addWorksheet('Смета');
 
-  // Строим данные для таблицы
-  const rows = [];
-  rows.push(['СМЕТА НА СТРОИТЕЛЬНО-МОНТАЖНЫЕ РАБОТЫ']);
-  rows.push([]);
-  rows.push(['Объект:', d.objName || '']);
-  rows.push(['Адрес:', d.address || '']);
-  rows.push(['Заказчик:', d.client || '']);
-  rows.push(['Составитель:', d.author || '']);
-  rows.push(['Дата:', d.date || '']);
-  if(d.note) rows.push(['Примечание:', d.note]);
-  rows.push([]);
-  rows.push(['РАЗДЕЛ 1. МАТЕРИАЛЫ']);
-  rows.push(['№', 'Наименование', 'Ед. изм.', 'Количество', 'Цена (руб.)', 'Сумма (руб.)']);
-  matRows.forEach(r => rows.push(r));
-  if(!matRows.length) rows.push(['—', '(нет позиций)', '', '', '', '']);
-  rows.push(['', '', '', '', 'Итого материалы:', mT]);
-  rows.push([]);
-  rows.push(['РАЗДЕЛ 2. РАБОТЫ']);
-  rows.push(['№', 'Наименование', 'Ед. изм.', 'Количество', 'Цена (руб.)', 'Сумма (руб.)']);
-  workRows.forEach(r => rows.push(r));
-  if(!workRows.length) rows.push(['—', '(нет позиций)', '', '', '', '']);
-  rows.push(['', '', '', '', 'Итого работы:', wT]);
-  rows.push([]);
-  rows.push(['', '', '', '', 'ИТОГО ВСЕГО:', mT + wT]);
-  rows.push([]);
-  rows.push(['Заказчик:', '', '', '_______________________', d.client || '']);
-  rows.push(['Исполнитель:', '', '', '_______________________', d.author || '']);
+  const GREEN  = '1D9E75';
+  const DKGREEN = '0F6E56';
+  const LTGREEN = 'E1F5EE';
+  const STRIPE  = 'F2FAF7';
+  const WHITE   = 'FFFFFF';
 
-  // Генерируем XML для xlsx
-  const xmlRows = rows.map(row => {
-    const cells = row.map((val, ci) => {
-      const col = String.fromCharCode(65 + ci);
-      if(typeof val === 'number') {
-        return `<c r="${col}${rows.indexOf(row)+1}" t="n"><v>${val}</v></c>`;
-      } else {
-        const escaped = String(val||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
-        return `<c r="${col}${rows.indexOf(row)+1}" t="inlineStr"><is><t>${escaped}</t></is></c>`;
-      }
+  ws.columns = [
+    { width: 5 },
+    { width: 38 },
+    { width: 12 },
+    { width: 13 },
+    { width: 16 },
+    { width: 18 },
+  ];
+
+  function addRow(vals, styles) {
+    const row = ws.addRow(vals);
+    styles && styles.forEach((s, i) => {
+      if (!s) return;
+      const cell = row.getCell(i + 1);
+      if (s.bold || s.color) cell.font = { name: 'Arial', bold: !!s.bold, color: s.color ? { argb: 'FF' + s.color } : undefined, size: s.size || 10 };
+      if (s.bg) cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF' + s.bg } };
+      if (s.align) cell.alignment = { horizontal: s.align, vertical: 'middle', wrapText: true };
+      if (s.border) cell.border = { bottom: { style: 'thin', color: { argb: 'FFD0EDE3' } } };
     });
-    return `<row>${cells.join('')}</row>`;
-  }).join('');
+    row.height = styles && styles[0] && styles[0].height ? styles[0].height : 18;
+    return row;
+  }
 
-  const sheet = `<?xml version="1.0" encoding="UTF-8"?>
-<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
-<sheetData>${xmlRows}</sheetData>
-</worksheet>`;
+  function mergeRow(rowNum, from, to, val, font, fill, align) {
+    ws.mergeCells(rowNum, from, rowNum, to);
+    const cell = ws.getCell(rowNum, from);
+    cell.value = val;
+    if (font) cell.font = { name: 'Arial', ...font };
+    if (fill) cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF' + fill } };
+    if (align) cell.alignment = { horizontal: align, vertical: 'middle', wrapText: true };
+  }
 
-  const workbook = `<?xml version="1.0" encoding="UTF-8"?>
-<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"
-          xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
-<sheets><sheet name="Смета" sheetId="1" r:id="rId1"/></sheets>
-</workbook>`;
+  let R = 1;
 
-  const rels = `<?xml version="1.0" encoding="UTF-8"?>
-<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
-<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/>
-</Relationships>`;
+  // Заголовок
+  ws.addRow(['СМЕТА НА СТРОИТЕЛЬНО-МОНТАЖНЫЕ РАБОТЫ', '', '', '', '', '']);
+  ws.mergeCells(R, 1, R, 6);
+  const titleCell = ws.getCell(R, 1);
+  titleCell.font = { name: 'Arial', bold: true, size: 14, color: { argb: 'FF' + WHITE } };
+  titleCell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF' + GREEN } };
+  titleCell.alignment = { horizontal: 'center', vertical: 'middle' };
+  ws.getRow(R).height = 30;
+  R++;
 
-  const contentTypes = `<?xml version="1.0" encoding="UTF-8"?>
-<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
-<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
-<Default Extension="xml" ContentType="application/xml"/>
-<Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>
-<Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>
-</Types>`;
+  // Пустая строка
+  ws.addRow([]); R++;
 
-  // Собираем ZIP вручную (простой метод)
-  return createZip([
-    { name: '[Content_Types].xml', data: contentTypes },
-    { name: '_rels/.rels', data: `<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>` },
-    { name: 'xl/workbook.xml', data: workbook },
-    { name: 'xl/_rels/workbook.xml.rels', data: rels },
-    { name: 'xl/worksheets/sheet1.xml', data: sheet },
-  ]);
-}
+  // Инфо блок
+  const infoStyle = [{ bold: true, color: DKGREEN, size: 10 }, { size: 10 }, null, null, null, null];
+  const infos = [
+    ['Объект:', d.objName || ''],
+    ['Адрес:', d.address || ''],
+    ['Заказчик:', d.client || ''],
+    ['Составитель:', d.author || ''],
+    ['Дата:', d.date || ''],
+  ];
+  if (d.note) infos.push(['Примечание:', d.note]);
 
-function createZip(files) {
-  // Простой ZIP без компрессии
-  const buffers = [];
-  const centralDir = [];
-  let offset = 0;
-
-  files.forEach(file => {
-    const nameBytes = Buffer.from(file.name, 'utf-8');
-    const dataBytes = Buffer.from(file.data, 'utf-8');
-    const crc = crc32(dataBytes);
-
-    const local = Buffer.alloc(30 + nameBytes.length);
-    local.writeUInt32LE(0x04034b50, 0);
-    local.writeUInt16LE(20, 4);
-    local.writeUInt16LE(0, 6);
-    local.writeUInt16LE(0, 8);
-    local.writeUInt16LE(0, 10);
-    local.writeUInt16LE(0, 12);
-    local.writeUInt32LE(crc, 14);
-    local.writeUInt32LE(dataBytes.length, 18);
-    local.writeUInt32LE(dataBytes.length, 22);
-    local.writeUInt16LE(nameBytes.length, 26);
-    local.writeUInt16LE(0, 28);
-    nameBytes.copy(local, 30);
-
-    const central = Buffer.alloc(46 + nameBytes.length);
-    central.writeUInt32LE(0x02014b50, 0);
-    central.writeUInt16LE(20, 4);
-    central.writeUInt16LE(20, 6);
-    central.writeUInt16LE(0, 8);
-    central.writeUInt16LE(0, 10);
-    central.writeUInt16LE(0, 12);
-    central.writeUInt16LE(0, 14);
-    central.writeUInt32LE(crc, 16);
-    central.writeUInt32LE(dataBytes.length, 20);
-    central.writeUInt32LE(dataBytes.length, 24);
-    central.writeUInt16LE(nameBytes.length, 28);
-    central.writeUInt16LE(0, 30);
-    central.writeUInt16LE(0, 32);
-    central.writeUInt16LE(0, 34);
-    central.writeUInt16LE(0, 36);
-    central.writeUInt32LE(0, 38);
-    central.writeUInt32LE(offset, 42);
-    nameBytes.copy(central, 46);
-
-    buffers.push(local, dataBytes);
-    centralDir.push(central);
-    offset += local.length + dataBytes.length;
+  infos.forEach(([lbl, val]) => {
+    const row = ws.addRow([lbl, val, '', '', '', '']);
+    ws.mergeCells(R, 2, R, 6);
+    row.getCell(1).font = { name: 'Arial', bold: true, size: 10, color: { argb: 'FF' + DKGREEN } };
+    row.getCell(2).font = { name: 'Arial', size: 10 };
+    row.getCell(2).alignment = { wrapText: true };
+    row.height = 18;
+    R++;
   });
 
-  const centralBuf = Buffer.concat(centralDir);
-  const end = Buffer.alloc(22);
-  end.writeUInt32LE(0x06054b50, 0);
-  end.writeUInt16LE(0, 4);
-  end.writeUInt16LE(0, 6);
-  end.writeUInt16LE(files.length, 8);
-  end.writeUInt16LE(files.length, 10);
-  end.writeUInt32LE(centralBuf.length, 12);
-  end.writeUInt32LE(offset, 16);
-  end.writeUInt16LE(0, 20);
+  ws.addRow([]); R++;
 
-  return Buffer.concat([...buffers, centralBuf, end]);
-}
+  // Секция helper
+  function addSection(title, rows, type) {
+    // Заголовок раздела
+    ws.addRow([title, '', '', '', '', '']);
+    ws.mergeCells(R, 1, R, 6);
+    const secCell = ws.getCell(R, 1);
+    secCell.value = title;
+    secCell.font = { name: 'Arial', bold: true, size: 11, color: { argb: 'FF' + WHITE } };
+    secCell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF' + DKGREEN } };
+    secCell.alignment = { horizontal: 'left', vertical: 'middle' };
+    ws.getRow(R).height = 22;
+    R++;
 
-function crc32(buf) {
-  let crc = 0xFFFFFFFF;
-  for(let i = 0; i < buf.length; i++) {
-    crc ^= buf[i];
-    for(let j = 0; j < 8; j++) {
-      crc = (crc >>> 1) ^ (crc & 1 ? 0xEDB88320 : 0);
+    // Заголовки колонок
+    const hrow = ws.addRow(['№', 'Наименование', 'Ед. изм.', 'Количество', 'Цена (руб.)', 'Сумма (руб.)']);
+    hrow.eachCell(cell => {
+      cell.font = { name: 'Arial', bold: true, size: 10, color: { argb: 'FF' + WHITE } };
+      cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF' + GREEN } };
+      cell.alignment = { horizontal: 'center', vertical: 'middle' };
+    });
+    ws.getRow(R).height = 20;
+    R++;
+
+    // Данные
+    let total = 0, num = 1, shade = false;
+    rows.forEach(item => {
+      const drow = ws.addRow([num++, item.name, item.unit, item.qty, item.price, item.sum]);
+      const bg = shade ? STRIPE : WHITE;
+      drow.eachCell((cell, ci) => {
+        cell.font = { name: 'Arial', size: 10 };
+        cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF' + bg } };
+        cell.border = { bottom: { style: 'hair', color: { argb: 'FFD0EDE3' } } };
+        if (ci === 1) cell.alignment = { horizontal: 'center' };
+        if (ci >= 4) { cell.alignment = { horizontal: 'right' }; cell.numFmt = '#,##0.00'; }
+      });
+      ws.getRow(R).height = 18;
+      total += item.sum;
+      shade = !shade;
+      R++;
+    });
+
+    if (!rows.length) {
+      ws.addRow(['—', '(нет позиций)', '', '', '', '']);
+      R++;
     }
+
+    // Итого раздела
+    const srow = ws.addRow(['', '', '', '', 'Итого:', total]);
+    ws.mergeCells(R, 1, R, 4);
+    srow.getCell(5).font = { name: 'Arial', bold: true, size: 10, color: { argb: 'FF' + DKGREEN } };
+    srow.getCell(5).fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF' + LTGREEN } };
+    srow.getCell(5).alignment = { horizontal: 'right' };
+    srow.getCell(6).font = { name: 'Arial', bold: true, size: 10, color: { argb: 'FF' + DKGREEN } };
+    srow.getCell(6).fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF' + LTGREEN } };
+    srow.getCell(6).alignment = { horizontal: 'right' };
+    srow.getCell(6).numFmt = '#,##0.00';
+    ws.getRow(R).height = 20;
+    R++;
+
+    ws.addRow([]); R++;
+    return total;
   }
-  return (crc ^ 0xFFFFFFFF) >>> 0;
+
+  const mTotal = addSection('РАЗДЕЛ 1. МАТЕРИАЛЫ', d.matData || [], 'mat');
+  const wTotal = addSection('РАЗДЕЛ 2. РАБОТЫ', d.workData || [], 'work');
+
+  // ИТОГО ВСЕГО
+  const grand = ws.addRow(['', '', '', '', 'ИТОГО ВСЕГО:', mTotal + wTotal]);
+  ws.mergeCells(R, 1, R, 4);
+  grand.getCell(5).font = { name: 'Arial', bold: true, size: 12, color: { argb: 'FF' + WHITE } };
+  grand.getCell(5).fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF' + DKGREEN } };
+  grand.getCell(5).alignment = { horizontal: 'right', vertical: 'middle' };
+  grand.getCell(6).font = { name: 'Arial', bold: true, size: 12, color: { argb: 'FF' + WHITE } };
+  grand.getCell(6).fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF' + DKGREEN } };
+  grand.getCell(6).alignment = { horizontal: 'right', vertical: 'middle' };
+  grand.getCell(6).numFmt = '#,##0.00';
+  ws.getRow(R).height = 26;
+  R++;
+
+  ws.addRow([]); R++;
+  ws.addRow([]); R++;
+
+  // Подписи
+  const s1 = ws.addRow(['Заказчик:', '', '_______________________', '', d.client || '', '']);
+  s1.getCell(1).font = { name: 'Arial', bold: true, size: 10, color: { argb: 'FF' + DKGREEN } };
+  ws.getRow(R).height = 20; R++;
+
+  const s2 = ws.addRow(['Исполнитель:', '', '_______________________', '', d.author || '', '']);
+  s2.getCell(1).font = { name: 'Arial', bold: true, size: 10, color: { argb: 'FF' + DKGREEN } };
+  ws.getRow(R).height = 20;
+
+  return await wb.xlsx.writeBuffer();
 }
 
 function buildHTML(d) {
