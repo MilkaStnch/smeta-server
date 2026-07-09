@@ -1,16 +1,17 @@
 const express = require('express');
 const cors = require('cors');
 const TelegramBot = require('node-telegram-bot-api');
-
+ 
 const app = express();
 app.use(cors());
 app.use(express.json({ limit: '10mb' }));
-
+ 
 const BOT_TOKEN = process.env.BOT_TOKEN;
 const bot = new TelegramBot(BOT_TOKEN);
-
+ 
 app.get('/', (req, res) => res.send('Smeta server works!'));
-
+ 
+// ── ОТПРАВИТЬ HTML (смета для PDF) ──
 app.post('/send-pdf', async (req, res) => {
   const { chatId, smetaData } = req.body;
   if (!chatId || !smetaData) return res.status(400).json({ error: 'Missing data' });
@@ -20,45 +21,214 @@ app.post('/send-pdf', async (req, res) => {
     const fname = (smetaData.objName || 'smeta').replace(/\s+/g, '_') + '.html';
     await bot.sendDocument(chatId, buffer, {
       caption: '📋 Смета: ' + (smetaData.objName || '') + '\n💰 ' + getTotals(smetaData) + '\n\n📌 Откройте файл в браузере → нажмите "Сохранить PDF"'
-    }, {
-      filename: fname,
-      contentType: 'text/html'
-    });
+    }, { filename: fname, contentType: 'text/html' });
     res.json({ ok: true });
   } catch(e) {
     console.error(e);
     res.status(500).json({ error: e.message });
   }
 });
-
+ 
+// ── ОТПРАВИТЬ .json (смета для импорта) ──
 app.post('/send-smeta', async (req, res) => {
   const { chatId, smetaData } = req.body;
   if (!chatId || !smetaData) return res.status(400).json({ error: 'Missing data' });
   try {
     const content = JSON.stringify(smetaData, null, 2);
     const buffer = Buffer.from(content, 'utf-8');
-    const fname = (smetaData.name || smetaData.objName || 'smeta').replace(/\s+/g, '_') + '.smeta';
+    const fname = (smetaData.name || smetaData.objName || 'smeta').replace(/\s+/g, '_') + '.json';
     await bot.sendDocument(chatId, buffer, {
       caption: '📋 ' + (smetaData.name || smetaData.objName || 'Смета') + '\n💰 ' + getTotals(smetaData) + '\n\n📌 Загрузите файл в приложение чтобы открыть и редактировать'
-    }, {
-      filename: fname,
-      contentType: 'application/json'
-    });
+    }, { filename: fname, contentType: 'application/json' });
     res.json({ ok: true });
   } catch(e) {
     res.status(500).json({ error: e.message });
   }
 });
-
+ 
+// ── ОТПРАВИТЬ EXCEL ──
+app.post('/send-excel', async (req, res) => {
+  const { chatId, smetaData } = req.body;
+  if (!chatId || !smetaData) return res.status(400).json({ error: 'Missing data' });
+  try {
+    const xlsx = buildXLSX(smetaData);
+    const fname = (smetaData.objName || 'smeta').replace(/\s+/g, '_') + '.xlsx';
+    await bot.sendDocument(chatId, xlsx, {
+      caption: '📊 Смета (Excel): ' + (smetaData.objName || '') + '\n💰 ' + getTotals(smetaData)
+    }, { filename: fname, contentType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
+    res.json({ ok: true });
+  } catch(e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+ 
+// ── HELPERS ──
 function getTotals(d) {
   let mT = 0, wT = 0;
   (d.matData || []).forEach(r => mT += r.sum);
   (d.workData || []).forEach(r => wT += r.sum);
   return 'Итого: ' + fmt(mT + wT) + ' руб.';
 }
-
+ 
 function fmt(n) { return Number(n || 0).toLocaleString('ru-RU', { minimumFractionDigits: 2, maximumFractionDigits: 2 }); }
-
+ 
+// ── EXCEL builder (без внешних зависимостей, чистый XML) ──
+function buildXLSX(d) {
+  let mT = 0, wT = 0;
+  const matRows = (d.matData || []).map((r, i) => { mT += r.sum; return [i+1, r.name, r.unit, r.qty, r.price, r.sum]; });
+  const workRows = (d.workData || []).map((r, i) => { wT += r.sum; return [i+1, r.name, r.unit, r.qty, r.price, r.sum]; });
+ 
+  // Строим данные для таблицы
+  const rows = [];
+  rows.push(['СМЕТА НА СТРОИТЕЛЬНО-МОНТАЖНЫЕ РАБОТЫ']);
+  rows.push([]);
+  rows.push(['Объект:', d.objName || '']);
+  rows.push(['Адрес:', d.address || '']);
+  rows.push(['Заказчик:', d.client || '']);
+  rows.push(['Составитель:', d.author || '']);
+  rows.push(['Дата:', d.date || '']);
+  if(d.note) rows.push(['Примечание:', d.note]);
+  rows.push([]);
+  rows.push(['РАЗДЕЛ 1. МАТЕРИАЛЫ']);
+  rows.push(['№', 'Наименование', 'Ед. изм.', 'Количество', 'Цена (руб.)', 'Сумма (руб.)']);
+  matRows.forEach(r => rows.push(r));
+  if(!matRows.length) rows.push(['—', '(нет позиций)', '', '', '', '']);
+  rows.push(['', '', '', '', 'Итого материалы:', mT]);
+  rows.push([]);
+  rows.push(['РАЗДЕЛ 2. РАБОТЫ']);
+  rows.push(['№', 'Наименование', 'Ед. изм.', 'Количество', 'Цена (руб.)', 'Сумма (руб.)']);
+  workRows.forEach(r => rows.push(r));
+  if(!workRows.length) rows.push(['—', '(нет позиций)', '', '', '', '']);
+  rows.push(['', '', '', '', 'Итого работы:', wT]);
+  rows.push([]);
+  rows.push(['', '', '', '', 'ИТОГО ВСЕГО:', mT + wT]);
+  rows.push([]);
+  rows.push(['Заказчик:', '', '', '_______________________', d.client || '']);
+  rows.push(['Исполнитель:', '', '', '_______________________', d.author || '']);
+ 
+  // Генерируем XML для xlsx
+  const xmlRows = rows.map(row => {
+    const cells = row.map((val, ci) => {
+      const col = String.fromCharCode(65 + ci);
+      if(typeof val === 'number') {
+        return `<c r="${col}${rows.indexOf(row)+1}" t="n"><v>${val}</v></c>`;
+      } else {
+        const escaped = String(val||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+        return `<c r="${col}${rows.indexOf(row)+1}" t="inlineStr"><is><t>${escaped}</t></is></c>`;
+      }
+    });
+    return `<row>${cells.join('')}</row>`;
+  }).join('');
+ 
+  const sheet = `<?xml version="1.0" encoding="UTF-8"?>
+<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+<sheetData>${xmlRows}</sheetData>
+</worksheet>`;
+ 
+  const workbook = `<?xml version="1.0" encoding="UTF-8"?>
+<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"
+          xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+<sheets><sheet name="Смета" sheetId="1" r:id="rId1"/></sheets>
+</workbook>`;
+ 
+  const rels = `<?xml version="1.0" encoding="UTF-8"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/>
+</Relationships>`;
+ 
+  const contentTypes = `<?xml version="1.0" encoding="UTF-8"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
+<Default Extension="xml" ContentType="application/xml"/>
+<Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>
+<Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>
+</Types>`;
+ 
+  // Собираем ZIP вручную (простой метод)
+  return createZip([
+    { name: '[Content_Types].xml', data: contentTypes },
+    { name: '_rels/.rels', data: `<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>` },
+    { name: 'xl/workbook.xml', data: workbook },
+    { name: 'xl/_rels/workbook.xml.rels', data: rels },
+    { name: 'xl/worksheets/sheet1.xml', data: sheet },
+  ]);
+}
+ 
+function createZip(files) {
+  // Простой ZIP без компрессии
+  const buffers = [];
+  const centralDir = [];
+  let offset = 0;
+ 
+  files.forEach(file => {
+    const nameBytes = Buffer.from(file.name, 'utf-8');
+    const dataBytes = Buffer.from(file.data, 'utf-8');
+    const crc = crc32(dataBytes);
+ 
+    const local = Buffer.alloc(30 + nameBytes.length);
+    local.writeUInt32LE(0x04034b50, 0);
+    local.writeUInt16LE(20, 4);
+    local.writeUInt16LE(0, 6);
+    local.writeUInt16LE(0, 8);
+    local.writeUInt16LE(0, 10);
+    local.writeUInt16LE(0, 12);
+    local.writeUInt32LE(crc, 14);
+    local.writeUInt32LE(dataBytes.length, 18);
+    local.writeUInt32LE(dataBytes.length, 22);
+    local.writeUInt16LE(nameBytes.length, 26);
+    local.writeUInt16LE(0, 28);
+    nameBytes.copy(local, 30);
+ 
+    const central = Buffer.alloc(46 + nameBytes.length);
+    central.writeUInt32LE(0x02014b50, 0);
+    central.writeUInt16LE(20, 4);
+    central.writeUInt16LE(20, 6);
+    central.writeUInt16LE(0, 8);
+    central.writeUInt16LE(0, 10);
+    central.writeUInt16LE(0, 12);
+    central.writeUInt16LE(0, 14);
+    central.writeUInt32LE(crc, 16);
+    central.writeUInt32LE(dataBytes.length, 20);
+    central.writeUInt32LE(dataBytes.length, 24);
+    central.writeUInt16LE(nameBytes.length, 28);
+    central.writeUInt16LE(0, 30);
+    central.writeUInt16LE(0, 32);
+    central.writeUInt16LE(0, 34);
+    central.writeUInt16LE(0, 36);
+    central.writeUInt32LE(0, 38);
+    central.writeUInt32LE(offset, 42);
+    nameBytes.copy(central, 46);
+ 
+    buffers.push(local, dataBytes);
+    centralDir.push(central);
+    offset += local.length + dataBytes.length;
+  });
+ 
+  const centralBuf = Buffer.concat(centralDir);
+  const end = Buffer.alloc(22);
+  end.writeUInt32LE(0x06054b50, 0);
+  end.writeUInt16LE(0, 4);
+  end.writeUInt16LE(0, 6);
+  end.writeUInt16LE(files.length, 8);
+  end.writeUInt16LE(files.length, 10);
+  end.writeUInt32LE(centralBuf.length, 12);
+  end.writeUInt32LE(offset, 16);
+  end.writeUInt16LE(0, 20);
+ 
+  return Buffer.concat([...buffers, centralBuf, end]);
+}
+ 
+function crc32(buf) {
+  let crc = 0xFFFFFFFF;
+  for(let i = 0; i < buf.length; i++) {
+    crc ^= buf[i];
+    for(let j = 0; j < 8; j++) {
+      crc = (crc >>> 1) ^ (crc & 1 ? 0xEDB88320 : 0);
+    }
+  }
+  return (crc ^ 0xFFFFFFFF) >>> 0;
+}
+ 
 function buildHTML(d) {
   let mT = 0, wT = 0, matHTML = '', workHTML = '', num = 1;
   (d.matData || []).forEach(r => {
@@ -74,7 +244,7 @@ function buildHTML(d) {
     wT += r.sum;
   });
   if (!workHTML) workHTML = `<tr><td colspan="6" style="text-align:center;color:#aaa">— нет позиций —</td></tr>`;
-
+ 
   return `<!DOCTYPE html><html lang="ru"><head><meta charset="UTF-8"><title>Смета</title>
 <style>@page{size:A4;margin:15mm 14mm}*{box-sizing:border-box;margin:0;padding:0}
 body{font-family:Arial,sans-serif;font-size:10pt;color:#1A1A18}
@@ -122,6 +292,6 @@ ${d.note ? `<div class="ir"><span class="il">Примечание:</span><span>$
 <div class="ft"><span>Сформировано автоматически</span><span>${d.date}</span></div>
 </body></html>`;
 }
-
+ 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log('Server running on port', PORT));
