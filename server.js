@@ -1,16 +1,16 @@
 const express = require('express');
 const cors = require('cors');
 const TelegramBot = require('node-telegram-bot-api');
- 
+
 const app = express();
 app.use(cors());
 app.use(express.json({ limit: '10mb' }));
- 
+
 const BOT_TOKEN = process.env.BOT_TOKEN;
 const bot = new TelegramBot(BOT_TOKEN);
- 
+
 app.get('/', (req, res) => res.send('Smeta server works!'));
- 
+
 // ── ОТПРАВИТЬ HTML (смета для PDF) ──
 app.post('/send-pdf', async (req, res) => {
   const { chatId, smetaData } = req.body;
@@ -28,7 +28,7 @@ app.post('/send-pdf', async (req, res) => {
     res.status(500).json({ error: e.message });
   }
 });
- 
+
 // ── ОТПРАВИТЬ .json (смета для импорта) ──
 app.post('/send-smeta', async (req, res) => {
   const { chatId, smetaData } = req.body;
@@ -45,7 +45,7 @@ app.post('/send-smeta', async (req, res) => {
     res.status(500).json({ error: e.message });
   }
 });
- 
+
 // ── ОТПРАВИТЬ EXCEL ──
 app.post('/send-excel', async (req, res) => {
   const { chatId, smetaData } = req.body;
@@ -61,7 +61,7 @@ app.post('/send-excel', async (req, res) => {
     res.status(500).json({ error: e.message });
   }
 });
- 
+
 // ── HELPERS ──
 function getTotals(d) {
   let mT = 0, wT = 0;
@@ -69,15 +69,15 @@ function getTotals(d) {
   (d.workData || []).forEach(r => wT += r.sum);
   return 'Итого: ' + fmt(mT + wT) + ' руб.';
 }
- 
+
 function fmt(n) { return Number(n || 0).toLocaleString('ru-RU', { minimumFractionDigits: 2, maximumFractionDigits: 2 }); }
- 
+
 // ── EXCEL builder (без внешних зависимостей, чистый XML) ──
 function buildXLSX(d) {
   let mT = 0, wT = 0;
   const matRows = (d.matData || []).map((r, i) => { mT += r.sum; return [i+1, r.name, r.unit, r.qty, r.price, r.sum]; });
   const workRows = (d.workData || []).map((r, i) => { wT += r.sum; return [i+1, r.name, r.unit, r.qty, r.price, r.sum]; });
- 
+
   // Строим данные для таблицы
   const rows = [];
   rows.push(['СМЕТА НА СТРОИТЕЛЬНО-МОНТАЖНЫЕ РАБОТЫ']);
@@ -105,7 +105,7 @@ function buildXLSX(d) {
   rows.push([]);
   rows.push(['Заказчик:', '', '', '_______________________', d.client || '']);
   rows.push(['Исполнитель:', '', '', '_______________________', d.author || '']);
- 
+
   // Генерируем XML для xlsx
   const xmlRows = rows.map(row => {
     const cells = row.map((val, ci) => {
@@ -119,23 +119,23 @@ function buildXLSX(d) {
     });
     return `<row>${cells.join('')}</row>`;
   }).join('');
- 
+
   const sheet = `<?xml version="1.0" encoding="UTF-8"?>
 <worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
 <sheetData>${xmlRows}</sheetData>
 </worksheet>`;
- 
+
   const workbook = `<?xml version="1.0" encoding="UTF-8"?>
 <workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"
           xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
 <sheets><sheet name="Смета" sheetId="1" r:id="rId1"/></sheets>
 </workbook>`;
- 
+
   const rels = `<?xml version="1.0" encoding="UTF-8"?>
 <Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
 <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/>
 </Relationships>`;
- 
+
   const contentTypes = `<?xml version="1.0" encoding="UTF-8"?>
 <Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
 <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
@@ -143,7 +143,7 @@ function buildXLSX(d) {
 <Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>
 <Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>
 </Types>`;
- 
+
   // Собираем ZIP вручную (простой метод)
   return createZip([
     { name: '[Content_Types].xml', data: contentTypes },
@@ -153,18 +153,18 @@ function buildXLSX(d) {
     { name: 'xl/worksheets/sheet1.xml', data: sheet },
   ]);
 }
- 
+
 function createZip(files) {
   // Простой ZIP без компрессии
   const buffers = [];
   const centralDir = [];
   let offset = 0;
- 
+
   files.forEach(file => {
     const nameBytes = Buffer.from(file.name, 'utf-8');
     const dataBytes = Buffer.from(file.data, 'utf-8');
     const crc = crc32(dataBytes);
- 
+
     const local = Buffer.alloc(30 + nameBytes.length);
     local.writeUInt32LE(0x04034b50, 0);
     local.writeUInt16LE(20, 4);
@@ -178,7 +178,7 @@ function createZip(files) {
     local.writeUInt16LE(nameBytes.length, 26);
     local.writeUInt16LE(0, 28);
     nameBytes.copy(local, 30);
- 
+
     const central = Buffer.alloc(46 + nameBytes.length);
     central.writeUInt32LE(0x02014b50, 0);
     central.writeUInt16LE(20, 4);
@@ -198,12 +198,12 @@ function createZip(files) {
     central.writeUInt32LE(0, 38);
     central.writeUInt32LE(offset, 42);
     nameBytes.copy(central, 46);
- 
+
     buffers.push(local, dataBytes);
     centralDir.push(central);
     offset += local.length + dataBytes.length;
   });
- 
+
   const centralBuf = Buffer.concat(centralDir);
   const end = Buffer.alloc(22);
   end.writeUInt32LE(0x06054b50, 0);
@@ -214,10 +214,10 @@ function createZip(files) {
   end.writeUInt32LE(centralBuf.length, 12);
   end.writeUInt32LE(offset, 16);
   end.writeUInt16LE(0, 20);
- 
+
   return Buffer.concat([...buffers, centralBuf, end]);
 }
- 
+
 function crc32(buf) {
   let crc = 0xFFFFFFFF;
   for(let i = 0; i < buf.length; i++) {
@@ -228,7 +228,7 @@ function crc32(buf) {
   }
   return (crc ^ 0xFFFFFFFF) >>> 0;
 }
- 
+
 function buildHTML(d) {
   let mT = 0, wT = 0, matHTML = '', workHTML = '', num = 1;
   (d.matData || []).forEach(r => {
@@ -244,7 +244,7 @@ function buildHTML(d) {
     wT += r.sum;
   });
   if (!workHTML) workHTML = `<tr><td colspan="6" style="text-align:center;color:#aaa">— нет позиций —</td></tr>`;
- 
+
   return `<!DOCTYPE html><html lang="ru"><head><meta charset="UTF-8"><title>Смета</title>
 <style>@page{size:A4;margin:15mm 14mm}*{box-sizing:border-box;margin:0;padding:0}
 body{font-family:Arial,sans-serif;font-size:10pt;color:#1A1A18}
@@ -292,6 +292,6 @@ ${d.note ? `<div class="ir"><span class="il">Примечание:</span><span>$
 <div class="ft"><span>Сформировано автоматически</span><span>${d.date}</span></div>
 </body></html>`;
 }
- 
+
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log('Server running on port', PORT));
